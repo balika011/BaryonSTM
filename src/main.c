@@ -136,7 +136,7 @@ struct challange_key keys[] =
 	{0xD9, {0xC7, 0xAC, 0x13, 0x06, 0xDE, 0xFE, 0x39, 0xEC, 0x83, 0xA1, 0x48, 0x3B, 0x0E, 0xE2, 0xEC, 0x89}}
 };
 
-static void MixChallenge1(uint8_t version, uint8_t *challenge, uint8_t *data)
+static char MixChallenge1(uint8_t version, uint8_t *challenge, uint8_t *data)
 {
 	uint8_t *secret1 = 0;
 
@@ -147,7 +147,7 @@ static void MixChallenge1(uint8_t version, uint8_t *challenge, uint8_t *data)
 	}
 
 	if (!secret1)
-		return;
+		return 0;
 
 	data[0x00] = secret1[0];
 	data[0x01] = secret1[1];
@@ -166,9 +166,11 @@ static void MixChallenge1(uint8_t version, uint8_t *challenge, uint8_t *data)
 	data[0x0D] = challenge[5];
 	data[0x0E] = challenge[6];
 	data[0x0F] = challenge[7];
+
+	return 1;
 }
 
-static void MixChallenge2(uint8_t version, uint8_t *challenge, uint8_t *data)
+static char MixChallenge2(uint8_t version, uint8_t *challenge, uint8_t *data)
 {
 	uint8_t *secret2 = 0;
 
@@ -179,7 +181,7 @@ static void MixChallenge2(uint8_t version, uint8_t *challenge, uint8_t *data)
 	}
 
 	if (!secret2)
-		return;
+		return 0;
 
 	data[0x00] = challenge[0];
 	data[0x01] = challenge[1];
@@ -198,9 +200,11 @@ static void MixChallenge2(uint8_t version, uint8_t *challenge, uint8_t *data)
 	data[0x0D] = secret2[5];
 	data[0x0E] = secret2[6];
 	data[0x0F] = secret2[7];
+
+	return 1;
 }
 
-static void ECBEncryptBytes(uint8_t *clearBytes, uint8_t version, uint8_t *encryptedBytes)
+static char ECBEncryptBytes(uint8_t *clearBytes, uint8_t version, uint8_t *encryptedBytes)
 {
 	uint8_t *key = 0;
 	for (int i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
@@ -210,30 +214,61 @@ static void ECBEncryptBytes(uint8_t *clearBytes, uint8_t version, uint8_t *encry
 	}
 
 	if (!key)
-		return;
+		return 0;
 
 	AES_ctx ctx;
 	AES_set_key(&ctx, key, 128);
 
 	AES_encrypt(&ctx, clearBytes, encryptedBytes);
+
+	return 1;
 }
 
 uint8_t response1a[8];
 uint8_t response1b[8] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
 uint8_t response2g[8];
 
-static void GenerateResponse(uint8_t version, uint8_t *req)
+static char GenerateResponse(uint8_t version, uint8_t *req)
 {
 	uint8_t data[16];
-	MixChallenge1(version, req, data);
-	ECBEncryptBytes(data, version, data);
+	if (!MixChallenge1(version, req, data))
+		return 0;
+	if (!ECBEncryptBytes(data, version, data))
+		return 0;
 	memcpy(response1a, data, 8);
 
-	MixChallenge2(version, response1b, data);
-	ECBEncryptBytes(data, version, data);
-	ECBEncryptBytes(data, version, data);
+	if (!MixChallenge2(version, response1b, data))
+		return 0;
+	if (!ECBEncryptBytes(data, version, data))
+		return 0;
+	if (!ECBEncryptBytes(data, version, data))
+		return 0;
 	memcpy(response2g, data, 8);
+	return 1;
 }
+
+enum COMMANDS
+{
+	READ_STATUS = 1,
+	READ_TEMPERATURE,
+	READ_VOLTAGE,
+	READ_CURRENT,
+	READ_CAPACITY = 7,
+	READ_8,
+	READ_TIME_LEFT,
+	READ_11 = 11,
+	READ_SERIALNO,
+	READ_13,
+	READ_22 = 22,
+	AUTH1 = 0x80,
+	AUTH2
+};
+
+enum RESPONSE
+{
+	NAK = 5,
+	ACK
+};
 
 int main(void)
 {
@@ -258,92 +293,102 @@ int main(void)
 
 		switch (recv[0])
 		{
-			case 0x01:
+			case READ_STATUS:
 			{
-				uint8_t answer[] = {0x06, 0x10, 0xC3, 0x06};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x02:
-			{
-				uint8_t answer[] = {0x06, 0x1B};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x03:
-			{
-				uint8_t answer[] = {0x06, 0x36, 0x10};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x04:
-			{
-				uint8_t answer[] = {0x06, 0x68, 0x10};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x07:
-			{
-				uint8_t answer[] = {0x06, 0x08, 0x07};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x08:
-			{
-				uint8_t answer[] = {0x06, 0xE2, 0x04};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x09:
-			{
-				uint8_t answer[] = {0x06, 0x01, 0x04};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x0B:
-			{
-				uint8_t answer[] = {0x06, 0x0F, 0x00};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x0C:
-			{
-				uint8_t sn[] = {0x06, serialno[1], serialno[0], serialno[3], serialno[2]};
-				sendPacket(sn, sizeof(sn));
-				break;
-			}
-			case 0x0D:
-			{
-				uint8_t answer[] = {0x06, 0x9D, 0x10, 0x10, 0x28, 0x14};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x16:
-			{
-				uint8_t answer[] = {0x06, 0x53, 0x6F, 0x6E, 0x79, 0x45, 0x6E, 0x65, 0x72, 0x67, 0x79, 0x44, 0x65, 0x76, 0x69, 0x63, 0x65, 0x73};
-				sendPacket(answer, sizeof(answer));
-				break;
-			}
-			case 0x80:
-			{
-				GenerateResponse(recv[1], &recv[2]);
-
-				uint8_t response[17] = {0x06};
-				memcpy(&response[1], response1a, 8);
-				memcpy(&response[9], response1b, 8);
+				uint8_t response[] = {ACK, 0x10, 0xC3, 0x06};
 				sendPacket(response, sizeof(response));
 				break;
 			}
-			case 0x81:
+			case READ_TEMPERATURE:
 			{
-				uint8_t response[9] = {0x06};
+				uint8_t response[] = {ACK, 0x1B};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_VOLTAGE:
+			{
+				uint8_t response[] = {ACK, 0x36, 0x10};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_CURRENT:
+			{
+				uint8_t response[] = {ACK, 0x68, 0x10};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_CAPACITY:
+			{
+				uint8_t response[] = {ACK, 0x08, 0x07};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_8:
+			{
+				uint8_t response[] = {ACK, 0xE2, 0x04};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_TIME_LEFT:
+			{
+				uint8_t response[] = {ACK, 0x01, 0x04};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_11:
+			{
+				uint8_t response[] = {ACK, 0x0F, 0x00};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_SERIALNO:
+			{
+				uint8_t sn[] = {ACK, serialno[1], serialno[0], serialno[3], serialno[2]};
+				sendPacket(sn, sizeof(sn));
+				break;
+			}
+			case READ_13:
+			{
+				uint8_t response[] = {ACK, 0x9D, 0x10, 0x10, 0x28, 0x14};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case READ_22:
+			{
+				uint8_t response[] = {ACK, 0x53, 0x6F, 0x6E, 0x79, 0x45, 0x6E, 0x65, 0x72, 0x67, 0x79, 0x44, 0x65, 0x76, 0x69, 0x63, 0x65, 0x73};
+				sendPacket(response, sizeof(response));
+				break;
+			}
+			case AUTH1:
+			{
+				if (GenerateResponse(recv[1], &recv[2]))
+				{
+					uint8_t response[17] = {ACK};
+					memcpy(&response[1], response1a, 8);
+					memcpy(&response[9], response1b, 8);
+					sendPacket(response, sizeof(response));
+				}
+				else
+				{
+					uint8_t response[] = {NAK};
+					sendPacket(response, sizeof(response));
+				}
+
+				break;
+			}
+			case AUTH2:
+			{
+				uint8_t response[9] = {ACK};
 				memcpy(&response[1], response2g, 8);
 				sendPacket(response, sizeof(response));
 				break;
 			}
 
 			default:
-				sendPacket(0, 0);
+			{
+				uint8_t response[] = {NAK};
+				sendPacket(response, sizeof(response));
+			}
 		}
 	}
 
