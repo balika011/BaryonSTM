@@ -34,8 +34,13 @@ static void clock_setup(void)
 
 	rcc_periph_clock_enable(RCC_AFIO);
 	rcc_periph_clock_enable(RCC_USART2);
+}
 
-	rcc_periph_clock_enable(RCC_SPI1);
+volatile uint32_t system_millis;
+
+void sys_tick_handler(void)
+{
+	system_millis++;
 }
 
 static void systick_setup(void)
@@ -58,21 +63,6 @@ static void usart_setup(void)
 	usart_set_parity(USART2, USART_PARITY_EVEN);
 	usart_set_flow_control(USART2, USART_FLOWCONTROL_NONE);
 	usart_enable(USART2);
-}
-
-static void sendPacket(uint8_t *packet, uint8_t length)
-{
-	usart_send_blocking(USART2, 0xA5);
-	usart_send_blocking(USART2, length + 1);
-
-	uint8_t sum = 0xA5 + length + 1;
-	for (int i = 0; i < length; i++)
-	{
-		usart_send_blocking(USART2, packet[i]);
-		sum += packet[i];
-	}
-
-	usart_send_blocking(USART2, ~sum);
 }
 
 struct challange_secret
@@ -224,44 +214,60 @@ static char ECBEncryptBytes(uint8_t *clearBytes, uint8_t version, uint8_t *encry
 	return 1;
 }
 
-uint8_t response1a[8];
-uint8_t response1b[8] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
-uint8_t response2g[8];
+uint8_t BatteryNonce[8] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
+uint8_t ChallangeVersion = 0;
 
-static char GenerateResponse(uint8_t version, uint8_t *req)
+static char GenerateResponse(uint8_t *req, uint8_t *resp)
 {
 	uint8_t data[16];
-	if (!MixChallenge1(version, req, data))
+	if (!MixChallenge1(ChallangeVersion, req, data))
 		return 0;
-	if (!ECBEncryptBytes(data, version, data))
-		return 0;
-	memcpy(response1a, data, 8);
 
-	if (!MixChallenge2(version, response1b, data))
+	if (!ECBEncryptBytes(data, ChallangeVersion, data))
 		return 0;
-	if (!ECBEncryptBytes(data, version, data))
+
+	memcpy(resp, data, 8);
+
+	return 1;
+}
+
+static char CheckResponse(uint8_t *req, uint8_t *resp)
+{
+	uint8_t data[16];
+	if (!MixChallenge2(ChallangeVersion, BatteryNonce, data))
 		return 0;
-	if (!ECBEncryptBytes(data, version, data))
+
+	if (!ECBEncryptBytes(data, ChallangeVersion, data))
 		return 0;
-	memcpy(response2g, data, 8);
+
+	if (memcmp(req, data, 8) != 0)
+		return 0;
+
+	if (!ECBEncryptBytes(data, ChallangeVersion, data))
+		return 0;
+
+	memcpy(resp, data, 8);
+
 	return 1;
 }
 
 enum COMMANDS
 {
-	READ_STATUS = 1,
-	READ_TEMPERATURE,
-	READ_VOLTAGE,
-	READ_CURRENT,
-	READ_CAPACITY = 7,
-	READ_8,
-	READ_TIME_LEFT,
-	READ_11 = 11,
-	READ_SERIALNO,
-	READ_13,
-	READ_22 = 22,
-	AUTH1 = 0x80,
-	AUTH2
+	CMD_READ_STATUS = 1,
+	CMD_READ_TEMPERATURE,
+	CMD_READ_VOLTAGE,
+	CMD_READ_CURRENT,
+	CMD_READ_CAPACITY = 7,
+	CMD_READ_8,
+	CMD_READ_TIME_LEFT,
+	CMD_READ_11 = 11,
+	CMD_READ_SERIALNO,
+	CMD_READ_13,
+	CMD_WRITE_EEPROM = 19, // 7 and 9 are the serial
+	CMD_READ_EEPROM,
+	CMD_READ_22 = 22,
+	CMD_AUTH1 = 0x80,
+	CMD_AUTH2
 };
 
 enum RESPONSE
@@ -270,126 +276,184 @@ enum RESPONSE
 	ACK
 };
 
+static void receivePacket(uint8_t *recv, uint8_t *len)
+{
+	while (true)
+	{
+		uint16_t r = usart_recv_blocking(USART2);
+		if ((uint8_t)r == 0x5A)
+			break;
+	}
+
+	uint8_t length = usart_recv_blocking(USART2);
+	if (len)
+		*len = length - 1;
+
+	for (int i = 0; i < length; i++)
+	{
+		uint32_t timeout = system_millis + 500;
+
+			while (!usart_get_flag(USART2, USART_SR_RXNE))
+			{
+				if (timeout < system_millis)
+				{
+					*len = 0;
+					return;
+				}
+			}
+
+		recv[i] = usart_recv(USART2);
+	}
+}
+
+static void sendPacket(uint8_t code, uint8_t *packet, uint8_t length)
+{
+	usart_send_blocking(USART2, 0xA5);
+	usart_send_blocking(USART2, length + 2);
+	usart_send_blocking(USART2, code);
+
+	uint8_t sum = 0xA5 + code + length + 2;
+	for (int i = 0; i < length; i++)
+	{
+		usart_send_blocking(USART2, packet[i]);
+		sum += packet[i];
+	}
+
+	usart_send_blocking(USART2, ~sum);
+}
+
 int main(void)
 {
 	clock_setup();
 	systick_setup();
 	usart_setup();
 
+	gpio_set_mode(GPIOC, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, GPIO13);
+	gpio_set(GPIOC, GPIO13);
+
 	while (true)
 	{
-		while (true)
-		{
-			uint16_t r = usart_recv_blocking(USART2);
-			if ((uint8_t)r == 0x5A)
-				break;
-		}
-
-		uint8_t length = usart_recv_blocking(USART2);
-
 		uint8_t recv[256];
-		for (int i = 0; i < length; i++)
-			recv[i] = usart_recv_blocking(USART2);
+		uint8_t length;
+		memset(recv, 0, 256);
+		receivePacket(recv, &length);
+
+		if (!length)
+			continue;
+
+		gpio_clear(GPIOC, GPIO13);
 
 		switch (recv[0])
 		{
-			case READ_STATUS:
+			case CMD_READ_STATUS:
 			{
-				uint8_t response[] = {ACK, 0x10, 0xC3, 0x06};
-				sendPacket(response, sizeof(response));
+				uint8_t response[] = {0x10, 0xC3, 0x06}; // 1731
+
+				sendPacket(ACK, response, sizeof(response));
 				break;
 			}
-			case READ_TEMPERATURE:
+			case CMD_READ_TEMPERATURE:
 			{
-				uint8_t response[] = {ACK, 0x1B};
-				sendPacket(response, sizeof(response));
+				uint8_t response = 27;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_VOLTAGE:
+			case CMD_READ_VOLTAGE:
 			{
-				uint8_t response[] = {ACK, 0x36, 0x10};
-				sendPacket(response, sizeof(response));
+				int voltage = 0;
+
+				uint16_t response = voltage;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_CURRENT:
+			case CMD_READ_CURRENT:
 			{
-				uint8_t response[] = {ACK, 0x68, 0x10};
-				sendPacket(response, sizeof(response));
+				uint16_t response = 4200;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_CAPACITY:
+			case CMD_READ_CAPACITY:
 			{
-				uint8_t response[] = {ACK, 0x08, 0x07};
-				sendPacket(response, sizeof(response));
+				uint16_t response = 1800;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_8:
+			case CMD_READ_8:
 			{
-				uint8_t response[] = {ACK, 0xE2, 0x04};
-				sendPacket(response, sizeof(response));
+				uint16_t response = 1250;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_TIME_LEFT:
+			case CMD_READ_TIME_LEFT:
 			{
-				uint8_t response[] = {ACK, 0x01, 0x04};
-				sendPacket(response, sizeof(response));
+				uint16_t response = 1025;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_11:
+			case CMD_READ_11:
 			{
-				uint8_t response[] = {ACK, 0x0F, 0x00};
-				sendPacket(response, sizeof(response));
+				uint16_t response = 15;
+				sendPacket(ACK, &response, sizeof(response));
 				break;
 			}
-			case READ_SERIALNO:
+			case CMD_READ_SERIALNO:
 			{
-				uint8_t sn[] = {ACK, serialno[1], serialno[0], serialno[3], serialno[2]};
-				sendPacket(sn, sizeof(sn));
+				uint8_t sn[] = {serialno[1], serialno[0], serialno[3], serialno[2]};
+				sendPacket(ACK, sn, sizeof(sn));
 				break;
 			}
-			case READ_13:
+			case CMD_READ_13:
 			{
-				uint8_t response[] = {ACK, 0x9D, 0x10, 0x10, 0x28, 0x14};
-				sendPacket(response, sizeof(response));
+				uint8_t response[] = {0x9D, 0x10, 0x10, 0x28, 0x14};
+				sendPacket(ACK, response, sizeof(response));
 				break;
 			}
-			case READ_22:
+			case CMD_READ_22:
 			{
-				uint8_t response[] = {ACK, 0x53, 0x6F, 0x6E, 0x79, 0x45, 0x6E, 0x65, 0x72, 0x67, 0x79, 0x44, 0x65, 0x76, 0x69, 0x63, 0x65, 0x73};
-				sendPacket(response, sizeof(response));
+				uint8_t response[] = {'S', 'o', 'n', 'y', 'E', 'n', 'e', 'r', 'g', 'y', 'D', 'e', 'v', 'i', 'c', 'e', 's'};
+				sendPacket(ACK, response, sizeof(response));
 				break;
 			}
-			case AUTH1:
+			case CMD_AUTH1:
 			{
-				if (GenerateResponse(recv[1], &recv[2]))
+				ChallangeVersion = recv[1];
+				uint8_t challangeResponse[8];
+				if (GenerateResponse(&recv[2], challangeResponse))
 				{
-					uint8_t response[17] = {ACK};
-					memcpy(&response[1], response1a, 8);
-					memcpy(&response[9], response1b, 8);
-					sendPacket(response, sizeof(response));
+					uint8_t response[16] = {};
+					memcpy(&response[0], challangeResponse, 8);
+					memcpy(&response[8], BatteryNonce, 8);
+					sendPacket(ACK, response, sizeof(response));
 				}
 				else
 				{
-					uint8_t response[] = {NAK};
-					sendPacket(response, sizeof(response));
+					sendPacket(NAK, 0, 0);
 				}
 
 				break;
 			}
-			case AUTH2:
+			case CMD_AUTH2:
 			{
-				uint8_t response[9] = {ACK};
-				memcpy(&response[1], response2g, 8);
-				sendPacket(response, sizeof(response));
+				uint8_t challangeResponse[8];
+				if (CheckResponse(&recv[1], challangeResponse))
+				{
+					sendPacket(ACK, challangeResponse, sizeof(challangeResponse));
+				}
+				else
+				{
+					sendPacket(NAK, 0, 0);
+				}
+
 				break;
 			}
 
 			default:
 			{
-				uint8_t response[] = {NAK};
-				sendPacket(response, sizeof(response));
+				sendPacket(NAK, 0, 0);
 			}
 		}
+		
+		gpio_set(GPIOC, GPIO13);
 	}
 
 	return 0;
